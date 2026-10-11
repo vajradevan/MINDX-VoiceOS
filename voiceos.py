@@ -138,6 +138,8 @@ def change_volume(target=None, amount=None, direction=0):
             new_volume = max(0, min(100, current + direction * amount))
 
         device.volume_percent = new_volume
+        remember_undo("volume", f"volume change to {new_volume}%", previous=current)
+        record_activity("DONE", f"Volume set to {new_volume}% (was {current}%).")
         say(f"Volume is now {new_volume} percent.")
     except Exception as error:
         say("I couldn't change the Windows volume.")
@@ -148,6 +150,76 @@ apps_opened_this_task = set()
 dictation_mode = False
 last_opened_app = None
 last_created_folder = None
+pending_plan = None
+plan_running = False
+last_undo_action = None
+activity_entries = []
+
+
+def record_activity(status, message):
+    """Keep a short, visible activity history in the VoiceOS terminal."""
+    entry = f"[{status}] {message}"
+    activity_entries.append(entry)
+    del activity_entries[:-12]
+    print(entry)
+
+
+def remember_undo(kind, label, **details):
+    """Remember only the latest action VoiceOS can safely reverse."""
+    global last_undo_action
+    last_undo_action = {"kind": kind, "label": label, **details}
+
+
+def undo_last_action():
+    """Reverse the last supported VoiceOS action, or send the app's Undo shortcut."""
+    global last_undo_action, last_created_folder
+    action = last_undo_action
+    try:
+        if action is None:
+            pyautogui.hotkey("ctrl", "z")
+            record_activity("UNDO", "Sent Ctrl+Z to the active app.")
+            say("Undo sent to the active app.")
+            return True
+
+        kind = action["kind"]
+        if kind == "volume":
+            AudioUtilities.GetSpeakers().volume_percent = action["previous"]
+        elif kind == "scroll":
+            pyautogui.scroll(action["notches"])
+        elif kind == "navigation":
+            pyautogui.hotkey("alt", action["key"])
+        elif kind == "folder":
+            folder = Path(action["path"])
+            if folder.exists():
+                # rmdir only removes an empty folder; it never deletes its contents.
+                folder.rmdir()
+            if last_created_folder == folder:
+                last_created_folder = None
+        elif kind == "document":
+            app_name = action.get("app")
+            if app_name:
+                focus_existing_app(app_name, announce=False)
+            pyautogui.hotkey("ctrl", "z")
+        elif kind == "none":
+            last_undo_action = None
+            say("The most recent action cannot be safely reversed.")
+            record_activity("INFO", action["label"])
+            return True
+        else:
+            raise ValueError("That action is not reversible.")
+
+        label = action["label"]
+        last_undo_action = None
+        record_activity("UNDONE", label)
+        say(f"Undid {label}.")
+    except OSError as error:
+        # In particular, a folder with files is never removed.
+        say("I couldn't undo that safely. The folder may contain files.")
+        print(f"Undo error: {error}")
+    except Exception as error:
+        say("I couldn't undo that action safely.")
+        print(f"Undo error: {error}")
+    return True
 
 
 def documents_or_desktop_folder(location="documents"):
@@ -180,8 +252,14 @@ def create_voice_folder(folder_name, location="documents"):
         return True
     folder = documents_or_desktop_folder(location) / safe_name
     try:
+        already_existed = folder.exists()
         folder.mkdir(parents=True, exist_ok=True)
         last_created_folder = folder
+        if already_existed:
+            remember_undo("none", "existing folder", path=str(folder))
+        else:
+            remember_undo("folder", f"folder {safe_name}", path=str(folder))
+        record_activity("DONE", f"Folder ready: {folder}")
         say(f"Folder {safe_name} is ready in your {location} folder.")
         print(f"Folder path: {folder}")
     except OSError as error:
@@ -221,7 +299,9 @@ def save_notepad_text(raw_name):
         pyautogui.write(str(target), interval=0.002)
         pyautogui.press("enter")
         pyautogui.sleep(0.6)
+        remember_undo("none", f"Saving {target.name} cannot be reversed by VoiceOS.")
         if target.exists():
+            record_activity("DONE", f"Saved note: {target}")
             say(f"Saved your Notepad text as {target.name} in {target_folder.name}.")
             print(f"Saved file: {target}")
         else:
@@ -255,10 +335,59 @@ def explain_local_limit(command):
     print(f"Unrecognized local command: {command}")
     return True
 
+
+def present_plan(steps):
+    """Show an allowlisted multi-step plan and wait for an explicit spoken confirmation."""
+    global pending_plan
+    if len(steps) > 6:
+        say("That plan has too many steps. Please split it into six steps or fewer.")
+        record_activity("BLOCKED", "Plan exceeded the six-step safety limit.")
+        return
+    pending_plan = list(steps)
+    print("\nPLAN PREVIEW — nothing has run yet:")
+    for number, step in enumerate(pending_plan, start=1):
+        print(f"  {number}. {step}")
+    record_activity("WAITING", f"Plan with {len(pending_plan)} steps needs confirmation.")
+    say(
+        "Here is my plan: " + "; then ".join(pending_plan)
+        + ". Say confirm plan to run it, or cancel plan."
+    )
+
+
+def run_confirmed_plan():
+    """Run a previously previewed plan exactly once, showing progress for each step."""
+    global pending_plan, plan_running
+    steps = pending_plan or []
+    pending_plan = None
+    if not steps:
+        say("There is no plan waiting for confirmation.")
+        return True
+
+    record_activity("STARTED", f"Running confirmed {len(steps)}-step plan.")
+    say("Confirmed. I’m starting the plan.")
+    plan_running = True
+    try:
+        for number, step in enumerate(steps, start=1):
+            print(f"\nSTEP {number}/{len(steps)}: {step}")
+            record_activity("RUNNING", f"Step {number}/{len(steps)}: {step}")
+            if not handle_command(step):
+                record_activity("STOPPED", "Plan stopped by VoiceOS.")
+                return False
+        record_activity("COMPLETE", "All confirmed plan steps finished.")
+        say("All plan steps are complete.")
+    except Exception as error:
+        record_activity("FAILED", "Plan stopped after an error.")
+        print(f"Plan error: {error}")
+        say("The plan stopped because a step failed. Check the activity log.")
+    finally:
+        plan_running = False
+    return True
+
 def handle_command(command):
-    global dictation_mode, last_opened_app
+    global dictation_mode, last_opened_app, pending_plan
     command = command.lower().strip()
     print(f"You said: {command}")
+    record_activity("HEARD", command[:100])
 
     if re.fullmatch(r"(?:stop|end|finish) dictation", command):
         if dictation_mode:
@@ -275,6 +404,19 @@ def handle_command(command):
     ):
         say("Stopping VoiceOS.")
         return False
+
+    if pending_plan is not None:
+        plan_reply = command.strip(" .!?")
+        if re.fullmatch(r"(?:yes|confirm|confirm plan|run plan|go ahead|do it)", plan_reply):
+            return run_confirmed_plan()
+        if re.fullmatch(r"(?:no|cancel|cancel plan|never mind|nevermind)", plan_reply):
+            step_count = len(pending_plan)
+            pending_plan = None
+            record_activity("CANCELLED", f"User cancelled the {step_count}-step plan.")
+            say("Plan cancelled. Nothing was run.")
+            return True
+        say("I have a plan waiting. Say confirm plan to run it, or cancel plan.")
+        return True
 
     # Saving is a command even during dictation, so it won't be typed into the note.
     save_match = re.fullmatch(
@@ -322,6 +464,10 @@ def handle_command(command):
                     pyautogui.press("enter")
             if not dictated_text.endswith("\n"):
                 pyautogui.write(" ", interval=0.01)
+            remember_undo(
+                "document", "the dictated text", app=last_opened_app
+            )
+            record_activity("DONE", f"Dictated: {dictated_text[:80]}")
             print(f"Dictated: {dictated_text}")
         except Exception as error:
             say("I couldn't type that phrase. Click inside the document and try again.")
@@ -360,9 +506,7 @@ def handle_command(command):
 
     # Undo and redo use standard shortcuts in the currently focused app.
     if re.search(r"\b(?:undo(?: that| the last action)?|take that back)\b", command):
-        pyautogui.hotkey("ctrl", "z")
-        say("Undo sent to the active app.")
-        return True
+        return undo_last_action()
 
     if re.search(r"\b(?:redo(?: that| the last action)?)\b", command):
         pyautogui.hotkey("ctrl", "y")
@@ -379,19 +523,29 @@ def handle_command(command):
     if len(steps) > 1:
         if not all(is_supported_plan_step(step) for step in steps):
             return explain_local_limit(command)
-        say(f"I’ll do those {len(steps)} steps in order.")
-        for step in steps:
-            if not handle_command(step):
-                return False
-        return True
+        if not plan_running:
+            present_plan(steps)
+            return True
 
     if re.search(r"\b(help|commands|what can you do)\b", command):
         say(
             "I can open apps, search the web, set or change volume, scroll, "
             "go back or forward, undo, redo, create folders, save Notepad notes, and dictate text. "
-            "Say create a folder called project notes, or save as meeting notes. Say done to finish a task, "
-            "or stop listening to exit."
+            "I preview multi-step plans before running them. Say confirm plan to proceed, cancel plan to cancel, "
+            "show activity to hear recent steps, or undo for a reversible last action. "
+            "Say done to finish a task, or stop listening to exit."
         )
+        return True
+
+    if re.fullmatch(r"(?:show activity|show recent activity|what did you do|what have you done)", command):
+        recent = activity_entries[-8:]
+        if not recent:
+            say("There is no recent activity yet.")
+            return True
+        print("\nRECENT ACTIVITY:")
+        for entry in recent:
+            print(f"  {entry}")
+        say(f"I have {len(recent)} recent activity entries. They are listed in the terminal.")
         return True
         
     if re.search(
@@ -458,6 +612,8 @@ def handle_command(command):
         if query:
             url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(query)
             webbrowser.open(url)
+            remember_undo("none", "A web search cannot be reversed by VoiceOS.")
+            record_activity("DONE", f"Searched the web for: {query}")
             say(f"Searching for {query}.")
             return True
 
@@ -471,6 +627,7 @@ def handle_command(command):
         app_name = open_match.group(1).strip(" .!?")
         app_name = re.sub(r"\s+(?:please|now)$", "", app_name).strip()
         app_name = re.sub(r"^(?:a|an|the)\s+", "", app_name).strip()
+        remember_undo("none", f"Opening {app_name} cannot be reversed by VoiceOS.")
 
         if app_name.lower() in ("browser", "web browser", "internet"):
             if "browser" in apps_opened_this_task:
@@ -548,11 +705,15 @@ def handle_command(command):
         return True
     if re.search(r"\b(go back|previous page|back one page)\b", command):
         pyautogui.hotkey("alt", "left")
+        remember_undo("navigation", "the previous-page action", key="right")
+        record_activity("DONE", "Navigated back one page.")
         say("Going back.")
         return True
 
     if re.search(r"\b(go forward|next page|forward one page)\b", command):
         pyautogui.hotkey("alt", "right")
+        remember_undo("navigation", "the next-page action", key="left")
+        record_activity("DONE", "Navigated forward one page.")
         say("Going forward.")
         return True
 
@@ -582,6 +743,8 @@ def handle_command(command):
             notches = 500
 
         pyautogui.scroll(scroll_direction * notches)
+        remember_undo("scroll", "the scroll action", notches=-scroll_direction * notches)
+        record_activity("DONE", f"Scrolled {'down' if scroll_direction < 0 else 'up'} {notches} notches.")
         say("Scrolling.")
         return True
 

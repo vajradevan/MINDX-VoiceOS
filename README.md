@@ -10,7 +10,10 @@ A Windows voice assistant prototype for local desktop actions using spoken Engli
 - Scrolls up and down
 - Navigates back and forward
 - Reads the current volume and lists available commands
-- Runs safe multi-step spoken requests in order without pausing for approval
+- Previews supported multi-step requests and waits for “confirm plan” before acting
+- Shows a step-by-step activity log in the terminal and accepts “cancel plan”
+- Reads out and prints recent actions when you say “show activity”
+- Undoes the latest reversible VoiceOS action (volume, scrolling, navigation, dictation, or an empty folder it created)
 - Brings an already-open matching app window forward instead of opening another copy
 - Avoids opening duplicate copies of apps during the current task
 - Dictates spoken words into the currently focused document after you say “start dictation”; say “stop dictation” to return to voice commands
@@ -39,7 +42,7 @@ Open a terminal in this project folder and run:
 
     .\.venv\Scripts\python.exe voiceos.py
 
-Say **“done”** to finish the current task and clear its short context while VoiceOS keeps listening. Say **“stop listening”** to exit.
+For a multi-step request, VoiceOS displays a numbered plan and waits. Say **“confirm plan”** (or “yes”) to run it, or **“cancel plan”** (or “no”) to do nothing. Say **“undo”** to reverse the last action VoiceOS can safely reverse. Undoing a folder only works while it is empty; VoiceOS never removes the folder's contents. If the last action is not reversible, VoiceOS says so. Say **“done”** to finish the current task and clear its short context while VoiceOS keeps listening. Say **“stop listening”** to exit.
 
 ## Example commands
 
@@ -62,7 +65,11 @@ Say **“done”** to finish the current task and clear its short context while 
 - “Create a new folder named project files on the desktop”
 - After dictating, say “save as meeting notes” or “save the Notepad text as meeting notes”
 - Say “new paragraph”, “new line”, “comma”, or “period” while dictating for basic punctuation and line breaks
-- “Open Notepad and then search the web for Python tutorials”
+- “Open Notepad and then search the web for Python tutorials” (preview first, then confirm)
+- “Open Calculator, then create a folder called calculations” (preview first; say “confirm plan” to run)
+- “Cancel plan” (discard a waiting preview)
+- “Undo” (reverse the last safely reversible action)
+- “Show activity” (read and display recent VoiceOS actions)
 - “Done” (finish the current task, keep VoiceOS listening, and clear recent task context)
 - “Stop listening”
 
@@ -70,4 +77,4 @@ For scrolling, place the mouse pointer over the page first. Percentage-based scr
 
 ## Safety
 
-VoiceOS uses only its built-in commands. Dictation types into the currently focused app, so click where you want the text before starting. Folder creation is limited to Documents or Desktop. Saving uses a new filename to avoid replacing existing notes. It does not run terminal commands, install software, or send screenshots to an AI service.
+VoiceOS uses only its built-in commands. Supported multi-step requests are previewed and require a spoken confirmation before running. Dictation types into the currently focused app, so click where you want the text before starting. Folder creation is limited to Documents or Desktop. Saving uses a new filename to avoid replacing existing notes. Undo is limited to known reversible actions; it never deletes folder contents. VoiceOS does not run terminal commands, install software, or send screenshots to an AI service.
